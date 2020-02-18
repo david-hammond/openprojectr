@@ -1,0 +1,57 @@
+---
+title: "Untitled"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(RPostgreSQL)
+library(tidyverse)
+drv <- dbDriver("PostgreSQL")
+host <- "localhost"
+port <- 5432
+user = password = "admin"
+db = "openproject"
+con <- dbConnect(drv, dbname=db,
+                 host = host, port = port,
+                user = user, password = password)
+workpackages <- dbReadTable(con, "work_packages")
+projects <- dbReadTable(con, "projects") %>% rename(project = name, project_id = id) %>%
+  select(project, project_id)
+users <- dbReadTable(con, "users") %>% rename(assigned_to_id = id) %>%
+  select(assigned_to_id, firstname, lastname)
+type <- dbReadTable(con, "types") %>% rename(tasktype = name, type_id = id) %>%
+  select(tasktype, type_id)
+all <- workpackages %>% left_join(projects) %>%
+  left_join(users) %>% left_join(type) %>%
+  select(project, tasktype, subject, start_date, due_date, firstname, lastname)
+print("hello")
+```
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Chart A
+
+```{r}
+print("hello")
+```
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Chart B
+
+```{r}
+
+```
+
+### Chart C
+
+```{r}
+
+```
+
