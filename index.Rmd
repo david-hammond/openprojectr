@@ -2,7 +2,8 @@
 title: "Untitled"
 output: 
   flexdashboard::flex_dashboard:
-    orientation: columns
+    theme: yeti
+    orientation: rows
     vertical_layout: fill
 ---
 
@@ -10,26 +11,75 @@ output:
 library(flexdashboard)
 library(RPostgreSQL)
 library(tidyverse)
+library(padr)
+library(bizdays)
+library(shiny)
+hours_in_a_day = 7.5
+colour_pallette = "Set2"
+lastmon <- function(x) 7 * floor(as.numeric(x-1+4)/7) + as.Date(1-4, origin="1970-01-01")
 drv <- dbDriver("PostgreSQL")
 host <- "localhost"
 port <- 5432
 user = password = "admin"
 db = "openproject"
+cal = create.calendar(name='WeekendsOnly', weekdays=c('sunday', 'saturday'))
 con <- dbConnect(drv, dbname=db,
-                 host = host, port = port,
-                user = user, password = password)
+                  host = host, port = port,
+                 user = user, password = password)
 workpackages <- dbReadTable(con, "work_packages")
 projects <- dbReadTable(con, "projects") %>% rename(project = name, project_id = id) %>%
   select(project, project_id)
+
+slacknames <- dbReadTable(con, "custom_values") %>% rename(assigned_to_id = customized_id, slackname = value) %>%
+  select(assigned_to_id, slackname)
 users <- dbReadTable(con, "users") %>% rename(assigned_to_id = id) %>%
-  select(assigned_to_id, firstname, lastname)
+  select(assigned_to_id, firstname, lastname) %>% left_join(slacknames)
 type <- dbReadTable(con, "types") %>% rename(tasktype = name, type_id = id) %>%
   select(tasktype, type_id)
 all <- workpackages %>% left_join(projects) %>%
   left_join(users) %>% left_join(type) %>%
-  select(project, tasktype, subject, start_date, due_date, firstname, lastname)
-print("hello")
+  select(project, tasktype, subject, start_date, due_date, firstname, lastname, slackname) %>%
+  filter(tasktype == "Task") 
+ztasks <- dbReadTable(con, "ztasks") 
+extrahours <- dbReadTable(con, "extrahours") 
+dbDisconnect(con)
+tmp <- all %>% gather("datetype", "date", start_date, due_date) %>% 
+   group_by(project, subject, firstname, lastname, slackname) %>% pad(interval = "day") %>% 
+  filter(is.bizday(date, cal)) %>%   ungroup() %>% select(-tasktype, -datetype) %>%
+  group_by(firstname, lastname, slackname, date) %>% mutate(days = 1/n()) %>%
+  ungroup() %>% mutate(week = lastmon(date)) %>%
+  group_by(project, subject, firstname, lastname, slackname, week) %>% summarise(days = sum(days)) %>%
+  ungroup()
+
+ztaskname = "Non-Project"
+#can optimise db to avoid rename
+ztmp <- ztasks %>% mutate(project = "Non-Project") %>%
+  select(project, task, slackname, date, days) %>%
+  rename(subject = task, week = date) %>% left_join(users %>% select(-assigned_to_id))
+
+tmp <- rbind(tmp, ztmp[,names(tmp)])
+
+tmp = tmp %>% group_by(week, firstname) %>% 
+  mutate(loss = sum(days[project == ztaskname])/length(project[project != ztaskname])) %>%
+  ungroup() 
+
+pos = tmp$project != ztaskname
+tmp$days[pos] =  tmp$days[pos] - tmp$loss[pos]
+pos = tmp$days < 0
+tmp$days[pos] = 0
+tmp = tmp %>% select(-loss) %>%
+  mutate(days = round(days, 2))
 ```
+
+Inputs {.sidebar}
+=====================================
+
+```{r}
+
+```
+
+Project Costs
+===================================== 
 
 Column {data-width=650}
 -----------------------------------------------------------------------
@@ -37,7 +87,14 @@ Column {data-width=650}
 ### Chart A
 
 ```{r}
-print("hello")
+tmp = extrahours %>% mutate(date = lastmon(date)) %>%
+  group_by(date) %>% summarise(hours = round(hours_in_a_day*sum(days)/length(!is.na(slackname)),2)) %>%
+  ungroup() %>% mutate(label = paste(hours, "Extra Hours")) 
+cols = RColorBrewer::brewer.pal(3, name = colour_pallette)
+plotly::ggplotly(ggplot(tmp, aes(date, hours, label = label)) + geom_bar(stat = "identity", fill = cols[1]) + 
+                   geom_text() +
+                   theme_minimal() + labs(x = "", y = "Hours", title = "Amount of Hours, On Average, Staff work<br>above standard 37.5 hour week") +
+                   theme(legend.position =  "none"))
 ```
 
 Column {data-width=350}
