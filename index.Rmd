@@ -1,12 +1,26 @@
 ---
-title: "Untitled"
-output: 
+title: "IEP Project Management"
+runtime: shiny
+output:
   flexdashboard::flex_dashboard:
     theme: yeti
     orientation: rows
-    vertical_layout: fill
 ---
 
+<style>                     
+.navbar {
+  background-color:#404244;
+  border-color:black;
+}
+.section.sidebar {
+  background-color:#404244;
+  border-color:black;
+  color: white;
+}
+.navbar-logo {
+  margin-top: 7px;
+}
+</style>    
 ```{r setup, include=FALSE}
 library(flexdashboard)
 library(RPostgreSQL)
@@ -15,6 +29,8 @@ library(padr)
 library(bizdays)
 library(shiny)
 library(rio)
+library(lubridate)
+library(plotly)
 hours_in_a_day = 7.5
 colour_pallette = "Set2"
 lastmon <- function(x) 7 * floor(as.numeric(x-1+4)/7) + as.Date(1-4, origin="1970-01-01")
@@ -44,7 +60,7 @@ all <- workpackages %>% left_join(projects) %>%
 ztasks <- dbReadTable(con, "ztasks") 
 extrahours <- dbReadTable(con, "extrahours") 
 dbDisconnect(con)
-tmp <- all %>% gather("datetype", "date", start_date, due_date) %>% 
+project_plan <- all %>% gather("datetype", "date", start_date, due_date) %>% 
    group_by(project, subject, firstname, lastname, slackname) %>% pad(interval = "day") %>% 
   filter(is.bizday(date, cal)) %>%   ungroup() %>% select(-tasktype, -datetype) %>%
   group_by(firstname, lastname, slackname, date) %>% mutate(days = 1/n()) %>%
@@ -58,38 +74,275 @@ ztmp <- ztasks %>% mutate(project = "Non-Project") %>%
   select(project, task, slackname, date, days) %>%
   rename(subject = task, week = date) %>% left_join(users %>% select(-assigned_to_id))
 
-tmp <- rbind(tmp, ztmp[,names(tmp)])
+project_plan <- rbind(project_plan, ztmp[,names(project_plan)])
 
-tmp = tmp %>% group_by(week, firstname) %>% 
+project_plan$today = ifelse(project_plan$week - lubridate::today()<=0, "spent", "allocated")
+
+project_plan = project_plan %>% group_by(week, firstname, lastname) %>% 
   mutate(loss = sum(days[project == ztaskname])/length(project[project != ztaskname])) %>%
   ungroup() 
 
-pos = tmp$project != ztaskname
-tmp$days[pos] =  tmp$days[pos] - tmp$loss[pos]
-pos = tmp$days < 0
-tmp$days[pos] = 0
-tmp = tmp %>% select(-loss) %>%
+pos = project_plan$project != ztaskname
+project_plan$days[pos] =  project_plan$days[pos] - project_plan$loss[pos]
+pos = project_plan$days < 0
+project_plan$days[pos] = 0
+project_plan = project_plan %>% select(-loss) %>%
   mutate(days = round(days, 2))
 
-tmp = tmp %>% left_join(import("projectcosts.xlsx", which = 1)) %>%
-  left_join(import("projectcosts.xlsx", which = 2))
+project_plan = project_plan %>% left_join(import("projectcosts.xlsx", which = 1)) %>%
+  left_join(import("projectcosts.xlsx", which = 2)) %>% filter(complete.cases(title))
 
+
+z_task_start = min(ztasks$date[year(ztasks$date) >= year(today())])
+#z_task_start = lastmon(lubridate::today() - 15)
+z_task_end = lastmon(lubridate::today() - 7)
 ```
 
 Inputs {.sidebar}
 =====================================
 
 ```{r}
+selectInput("currency", "Choose Metric", c("Work Days", "Australian Dollars", 
+                                           "US Dollars", "Euros", "British Pounds"))
+```
+
+
+```{r echo = F}
+
+currency = reactive({
+  tmp = "days"
+  if(input$currency == "Australian Dollars"){
+    tmp = "AUD"
+  }else if(input$currency == "US Dollars"){
+    tmp = "USD"
+  }else if(input$currency == "Euros"){
+    tmp = "EUR"
+  }
+  else if(input$currency == "British Pounds"){
+    tmp = "GBP"
+  }
+  tmp
+})
+
+prefix_symbol <- reactive({
+  
+if(currency() == "EUR"){
+  tmp = "€"
+}else if(currency() == "GBP"){
+  tmp = "£"
+} else if(currency() == "days"){
+  tmp = ""
+}else{
+  tmp = "$"
+}
+  tmp
+})
+
+get_costed <- reactive({
+  tmp = project_plan
+  tmp$cost = tmp$days
+  if(currency() != "days"){
+    tmp$cost = tmp$days * tmp[,currency()]
+  }
+  tmp
+})
 
 ```
+
 
 Project Costs
 ===================================== 
 
-Column {data-width=650}
+Row
 -----------------------------------------------------------------------
 
-### Chart A
+
+
+### Allocated vs Spent
+```{r}
+renderPlotly({
+tmp = get_costed() %>%
+  group_by(project, today) %>%
+  summarise(cost = sum(cost)) %>%
+  ungroup() %>%
+  group_by(project) %>%
+  mutate(total = ceiling(sum(cost)), pc = scales::percent(cost/total)) %>%
+  ungroup() %>%
+  arrange(total) %>%
+  mutate(project = factor(project, levels = unique(project), ordered = T),
+         today = factor(today, levels = rev(c("spent", "allocated")), ordered = T)) 
+cols = RColorBrewer::brewer.pal(3, name = "Set2")[1:2]
+if(prefix_symbol() == ""){
+  pos = tmp$today == "allocated"
+  tmp$pc[!pos] = ""
+    plotly::ggplotly(ggplot(tmp, aes(project, cost, fill = today, label = pc)) +
+                     geom_bar(stat = "identity")+ coord_flip() + theme_minimal() + geom_text()  +
+                     labs(x = "", y = input$currency, fill = "", title = paste("Total Cost Allocation Spend -", format(lubridate::today(), "%a %d %b %Y"))) + scale_fill_manual(values = rev(cols)) + scale_y_continuous(labels=scales::dollar_format(prefix=prefix_symbol())) )
+}else{
+  tmp$total = scales::dollar(tmp$total, prefix = prefix_symbol())
+  pos = tmp$today == "allocated"
+  tmp$total[!pos] = ""
+    plotly::ggplotly(ggplot(tmp, aes(project, cost, fill = today, label = total)) +
+                     geom_bar(stat = "identity")+ coord_flip() + theme_minimal() + geom_text() +
+                     labs(x = "", y = input$currency, fill = "", title = paste("Total Cost Allocation Spend -", format(lubridate::today(), "%a %d %b %Y"))) + scale_fill_manual(values = rev(cols)) + scale_y_continuous(labels=scales::dollar_format(prefix=prefix_symbol()))) 
+}
+
+})
+
+```
+
+### Research vs Comms
+```{r}
+renderPlotly({
+tmp = get_costed() %>%
+  group_by(project, dept) %>%
+  summarise(cost = sum(cost)) %>%
+  ungroup() %>%
+  group_by(project) %>%
+  mutate(total = ceiling(sum(cost)), pc = scales::percent(cost/total)) %>%
+  ungroup() %>%
+  arrange(total) %>%
+  mutate(project = factor(project, levels = unique(project), ordered = T))
+cols = RColorBrewer::brewer.pal(length(unique(tmp$dept)), name = colour_pallette)
+pos = tmp$dept != "Research"
+tmp$pc[pos] = ""
+    plotly::ggplotly(ggplot(tmp, aes(project, cost, fill = dept, label = pc)) +
+                     geom_bar(stat = "identity")+ coord_flip() + theme_minimal() + geom_text() +
+                     labs(x = "", y = input$currency, fill = "", title = paste("Total Cost Allocation Spend -", format(lubridate::today(), "%a %d %b %Y"))) + scale_fill_manual(values = rev(cols)) + scale_y_continuous(labels=scales::dollar_format(prefix=prefix_symbol())) )
+
+
+
+
+})
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Permanent vs Interns
+```{r}
+renderPlotly({
+tmp = get_costed() %>%
+  group_by(project, title) %>%
+  summarise(cost = sum(cost)) %>%
+  ungroup() %>%
+  group_by(project) %>%
+  mutate(total = ceiling(sum(cost)), pc = scales::percent(cost/total)) %>%
+  ungroup() %>%
+  arrange(total) %>%
+  mutate(project = factor(project, levels = unique(project), ordered = T))
+cols = RColorBrewer::brewer.pal(length(unique(tmp$title)), name = colour_pallette)
+plotly::ggplotly(ggplot(tmp, aes(project, cost, fill = title, label = pc)) +
+                   geom_bar(stat = "identity")+ coord_flip() + theme_minimal() + #geom_text() +
+                   labs(x = "", y = input$currency, fill = "", title = "Permanent Researchers Allocation") + 
+                   scale_fill_manual(values = rev(cols)) +
+  scale_y_continuous(labels=scales::dollar_format(prefix=prefix_symbol())))
+})
+```
+
+### Project Costs This Week
+
+```{r}
+DT::renderDataTable({
+tmp = project_plan
+test = ifelse(currency() == "days", "AUD", currency())
+test_symbol = ifelse(currency() == "days", "$", prefix_symbol())
+tmp$cost = tmp$days * tmp[,test]
+tmp = tmp %>%
+  group_by(week, project) %>%
+  summarise(this_week = sum(cost), fte_this_week = round(sum(days), 0)) %>%
+  ungroup() %>%
+  group_by(project) %>%
+  mutate(total_cost = sum(this_week), per_day = this_week / 5) %>%
+  filter(week == lastmon(lubridate::today()))%>%
+  arrange(desc(this_week)) %>% select(project, total_cost, per_day, this_week, fte_this_week) 
+x = data.frame(project = "TOTAL", total_cost = sum(tmp$total_cost),
+               per_day = sum(tmp$per_day),
+               this_week = sum(tmp$this_week),
+               fte_this_week = sum(tmp$fte_this_week), stringsAsFactors = F)
+tmp = tmp %>% bind_rows(x) %>%
+  mutate(total_cost = scales::dollar(total_cost, prefix = test_symbol), 
+         per_day = scales::dollar(per_day, prefix = test_symbol),
+         this_week = scales::dollar(this_week, prefix = test_symbol)) 
+
+  
+  DT::datatable(tmp, rownames = F, options = list(pageLength = nrow(tmp), dom = 't'),
+                caption = paste("Costs for Week Commencing", format(lastmon(lubridate::today()), "%a %d %b %Y")))
+})
+```
+
+
+
+
+Resources
+===================================== 
+
+Row
+-----------------------------------------------------------------------
+### Resource Load
+
+```{r}
+staff_slack = project_plan %>%
+  filter(grepl("Research", title)) %>%
+  group_by(week, title, firstname) %>%
+  summarise(days = sum(days), projects = paste(unique(project), collapse = ",")) %>%
+  ungroup() %>%
+  mutate(perm = ifelse(grepl("Fellow", title), 1, 0)) %>%
+  arrange(perm) %>%
+  mutate(firstname = factor(firstname, unique(firstname), ordered = T)) %>%
+  padr::pad(interval = "week", start_val = min(project_plan$week), end_val = max(project_plan$week),
+            group = "firstname")
+staff_slack$days[is.na(staff_slack$days)] = 0
+
+plotly::ggplotly(ggplot(staff_slack, aes(week, firstname, fill = days, label = projects, alpha = 0.5)) + geom_tile() + scale_fill_distiller(palette = "Spectral") +
+  theme_minimal() + labs(y = "", x = ""))
+```
+
+Row
+-----------------------------------------------------------------------
+
+
+### Overall Allocation
+```{r}
+renderPlotly({
+tmp = get_costed() %>%
+  filter(between(week, z_task_start, z_task_end )) %>%
+  group_by(funding) %>%
+  summarise(cost = sum(cost)) %>%
+  ungroup() %>%
+  mutate(total = sum(cost), pc = scales::percent(cost/total)) %>%
+  ungroup() %>%
+  arrange(desc(cost)) %>%
+  mutate(funding = factor(funding, levels = unique(funding), ordered = T))
+cols = RColorBrewer::brewer.pal(length(unique(tmp$funding)), name = colour_pallette)
+plotly::ggplotly(ggplot(tmp, aes(funding, cost, fill = funding, label = pc)) +
+                   geom_bar(stat = "identity")+ theme_minimal() + geom_text() +
+                   labs(x = "", y = input$currency, fill = "", title = paste("Total Cost Allocation Spend since", format(z_task_start, "%a %d %b %Y"))) +  scale_fill_manual(values = rev(cols)) +
+  scale_y_continuous(labels=scales::dollar_format(prefix=prefix_symbol())) + theme(legend.position =  "none"))
+})
+```
+
+### Non-Project Tasks
+```{r}
+
+tmp = ztasks %>%
+  select(date, project, task, days) %>%
+  filter(between(date, z_task_start, z_task_end )) %>%
+  mutate(days = round(as.numeric(days)*hours_in_a_day, 2),
+         date = format(date, format = "%d %b %Y")) %>%
+  group_by(task) %>%
+  summarise(days = sum(days)) %>%
+  arrange(days) %>%
+  ungroup() %>% 
+  mutate(project = factor(task, unique(task), ordered = T)) 
+cols = RColorBrewer::brewer.pal(8, name = "Set2")
+plotly::ggplotly(ggplot(tmp, aes(project, days, fill = project)) + geom_bar(stat = "identity") + coord_flip() +
+                   theme_minimal() + 
+                   scale_fill_manual(values = rev(cols)) + 
+                   labs(x = "", y = "Hours Spent on Non-Project Tasks", fill = "") +
+                   theme(legend.position = "none"))
+```
+### Extra Hours
 
 ```{r}
 tmp = extrahours %>% mutate(date = lastmon(date)) %>%
@@ -101,19 +354,3 @@ plotly::ggplotly(ggplot(tmp, aes(date, hours, label = label)) + geom_bar(stat = 
                    theme_minimal() + labs(x = "", y = "Hours", title = "Amount of Hours, On Average, Staff work<br>above standard 37.5 hour week") +
                    theme(legend.position =  "none"))
 ```
-
-Column {data-width=350}
------------------------------------------------------------------------
-
-### Chart B
-
-```{r}
-
-```
-
-### Chart C
-
-```{r}
-
-```
-
